@@ -1,0 +1,58 @@
+# Python bytecode and native extensions
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Packaging and build outputs
+.Python
+build/
+dist/
+site/
+pip-wheel-metadata/
+*.egg-info/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Tooling caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.hypothesis/
+.pyre/
+.tox/
+.nox/
+
+# Test and coverage artifacts
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# Logs and temp files
+*.log
+*.tmp
+*.swp
+*.swo
+
+# OS and editor noise
+.DS_Store
+.idea/
+.vscode/
+.claude/
+
+# Project-specific
+/data/
+datasets/
+outputs/
+wandb/
+*.npy
+.env

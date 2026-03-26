@@ -1,0 +1,65 @@
+experiment_name: ablation_stereo_sr_rect_none
+output_dir: outputs/ablation_stereo_sr_rect_none
+
+model:
+  name: stereo_sr
+  embed_dim: 192
+  num_heads: 6
+  num_blocks: 36
+  window_size: 16
+  cross_window_size: [4, 64]
+  cross_pos_encoding: none
+  residual_strategy: depth_agg
+  blocks_per_group: 8
+  mlp_hidden_dim: 384
+  upscale: 4
+  img_range: 1.0
+
+data:
+  dataset_root: /workspace/datasets/StereoSR
+  test_datasets: [flickr1024]
+  scale: 4
+  patch_size_lr: [32, 128]
+  batch_size: 4
+  num_workers: 4
+  prefetch_factor: 2
+  augment:
+    hflip_prob: 0.5
+    vflip_prob: 0.5
+    channel_shuffle_prob: 0.5
+    horizontal_shift_prob: 0.5
+    horizontal_shift_max_px: 8
+    batch_mix_mode: mixup
+    batch_mix_alpha: 1.0
+  use_geometry: false
+  geometry_dir: geometry
+
+train:
+  lr: 0.0001
+  total_iters: 50000
+  betas: [0.9, 0.99]
+  weight_decay: 0.0
+  scheduler: multistep
+  scheduler_milestones: [999999]
+  gradient_accumulation_steps: 1
+  max_grad_norm: 1.0
+  ema_decay: 0.999
+  compile: default
+  precision: bf16
+  checkpoint_dir: /workspace/checkpoints/ablation_stereo_sr_rect_none
+  checkpoint_interval: 10000
+  max_checkpoints: 2
+  eta_min: 0.0000001
+  log_interval: 10
+  val_interval: 2500
+  seed: 42
+  resume_from: ""
+  wandb_project: james-sissr
+  wandb_run_name: "ablation-stereo-sr-rect-none-50k"
+
+loss:
+  charbonnier_weight: 1.0
+  charbonnier_eps: 1e-12
+  warp_consistency_weight: 0.0
+  disparity_preservation_weight: 0.0
+  disparity_loss_interval: 1

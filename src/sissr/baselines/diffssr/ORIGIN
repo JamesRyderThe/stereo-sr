@@ -1,0 +1,13 @@
+Source: https://github.com/davinci7571/DIFFSSR
+Commit: 625ea0397b7763a30463191d659a19eb538a4b78
+License: CC BY-NC-SA 4.0
+Author: Dafeng Zhang (Samsung)
+Paper: "DIFFSSR: Differential Transformer for Stereo Image Super-Resolution" (NeurIPS 2025)
+Reimplementation date: 2026-03-20
+
+This is a clean reimplementation of the DIFFSSR architecture from the published paper
+and reference code. Weight-compatible with the original pretrained checkpoint
+(state_dict keys and parameter shapes match exactly for strict=True loading).
+
+No code is shared between this baseline and any other module in this repository.
+This directory is a frozen museum piece for reproduction purposes only.

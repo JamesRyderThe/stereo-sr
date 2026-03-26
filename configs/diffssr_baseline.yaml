@@ -1,0 +1,62 @@
+experiment_name: diffssr_baseline
+output_dir: outputs/diffssr_baseline
+
+model:
+  name: diffssr
+  embed_dim: 180
+  num_heads: 6
+  num_blocks: 13
+  block_depth: 3
+  window_size: 16
+  mlp_ratio: 2.0
+  upscale: 4
+  img_range: 1.0
+  resi_connection: "1conv"
+
+data:
+  dataset_root: /workspace/datasets/StereoSR
+  test_datasets: [flickr1024, kitti2012, kitti2015, middlebury]
+  scale: 4
+  patch_size_lr: [32, 96]
+  batch_size: 16
+  num_workers: 8
+  prefetch_factor: 4
+  augment:
+    hflip_prob: 0.5
+    vflip_prob: 0.5
+    channel_shuffle_prob: 0.5
+    horizontal_shift_prob: 0.5
+    horizontal_shift_max_px: 8
+    batch_mix_mode: mixup
+    batch_mix_alpha: 1.0
+  use_geometry: false
+  geometry_dir: geometry
+
+train:
+  lr: 0.0002
+  total_iters: 800000
+  betas: [0.9, 0.99]
+  weight_decay: 0.0
+  scheduler: cosine
+  gradient_accumulation_steps: 1
+  max_grad_norm: 1.0
+  ema_decay: 0.999
+  compile: default
+  precision: bf16
+  checkpoint_dir: /workspace/checkpoints/diffssr_baseline
+  checkpoint_interval: 50000
+  max_checkpoints: 3
+  eta_min: 0.0000001
+  log_interval: 10
+  val_interval: 10000
+  seed: 42
+  resume_from: ""
+  wandb_project: james-sissr
+  wandb_run_name: "diffssr-baseline-benchmark"
+
+loss:
+  charbonnier_weight: 1.0
+  charbonnier_eps: 1e-12
+  warp_consistency_weight: 0.0
+  disparity_preservation_weight: 0.0
+  disparity_loss_interval: 1
