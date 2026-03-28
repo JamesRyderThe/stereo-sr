@@ -91,8 +91,8 @@ class Trainer:
             milestones=config.train.scheduler_milestones,
         )
 
-        self._eval_model = unwrapped
         compiled = config.train.compile.apply(unwrapped)
+        self._eval_model = compiled
         if config.train.compile.value != "off":
             self.console.print(
                 f"[cyan]torch.compile enabled (mode={config.train.compile.value}). "
@@ -258,17 +258,18 @@ class Trainer:
         ssim_sum = 0.0
         count = 0
 
-        if self.accelerator.is_main_process:
-            for batch in loader:
-                lr = batch["lr"].to(self.accelerator.device)
-                gt = batch["gt"].to(self.accelerator.device)
-                with self.accelerator.autocast():
-                    sr = self._eval_model(lr)
-                for i in range(sr.shape[0]):
-                    metrics = compute_stereo_metrics(sr[i], gt[i])
-                    psnr_sum += metrics["psnr_stereo"]
-                    ssim_sum += metrics["ssim_stereo"]
-                    count += 1
+        for batch_index, batch in enumerate(loader):
+            if batch_index % self.accelerator.num_processes != self.accelerator.process_index:
+                continue
+            lr = batch["lr"].to(self.accelerator.device)
+            gt = batch["gt"].to(self.accelerator.device)
+            with self.accelerator.autocast():
+                sr = self._eval_model(lr)
+            for i in range(sr.shape[0]):
+                metrics = compute_stereo_metrics(sr[i], gt[i])
+                psnr_sum += metrics["psnr_stereo"]
+                ssim_sum += metrics["ssim_stereo"]
+                count += 1
         return _finalize_eval_metrics(self.accelerator, psnr_sum, ssim_sum, count)
 
     def run(self) -> None:

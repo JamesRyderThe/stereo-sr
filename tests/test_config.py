@@ -15,7 +15,7 @@ from sissr.configs.schema import (
     StereoSRModelConfig,
     TrainConfig,
 )
-from sissr.models.enums import CrossPosEncoding, ResidualStrategy
+from sissr.models.enums import ResidualStrategy
 
 
 def _write_yaml(tmp_path: Path, content: str) -> str:
@@ -103,6 +103,7 @@ def test_stereo_sr_defaults_override_base_model_defaults() -> None:
 
     assert config.embed_dim == 192
     assert config.num_blocks == 36
+    assert config.cross_window_size == (4, -1)
 
 
 def test_stereo_sr_blocks_per_group_allowed_for_depth_agg() -> None:
@@ -180,26 +181,6 @@ def test_stereo_sr_build_defaults_blocks_per_group_to_8() -> None:
     assert model.body.blocks_per_group == 8
 
 
-def test_stereo_sr_ablation_configs_remain_distinct() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    ablation_config = load_config(str(repo_root / "configs/ablation_stereo_sr.yaml"))
-    rect_none_config = load_config(str(repo_root / "configs/ablation_stereo_sr_rect_none.yaml"))
-
-    assert isinstance(ablation_config.model, StereoSRModelConfig)
-    assert isinstance(rect_none_config.model, StereoSRModelConfig)
-    assert (
-        ablation_config.model.cross_window_size,
-        ablation_config.model.cross_pos_encoding,
-        ablation_config.model.residual_strategy,
-        ablation_config.model.blocks_per_group,
-    ) != (
-        rect_none_config.model.cross_window_size,
-        rect_none_config.model.cross_pos_encoding,
-        rect_none_config.model.residual_strategy,
-        rect_none_config.model.blocks_per_group,
-    )
-
-
 def test_stereo_sr_full_width_cross_window_accepted() -> None:
     config = StereoSRModelConfig(
         embed_dim=48,
@@ -207,26 +188,18 @@ def test_stereo_sr_full_width_cross_window_accepted() -> None:
         num_blocks=4,
         window_size=4,
         cross_window_size=(4, -1),
-        cross_pos_encoding=CrossPosEncoding.NONE,
     )
     assert config.cross_window_size == (4, -1)
 
 
-def test_stereo_sr_full_width_requires_none_encoding() -> None:
-    for encoding in [
-        CrossPosEncoding.WINDOW_ROPE,
-        CrossPosEncoding.EPIPOLAR_ROPE,
-        CrossPosEncoding.RECTIFIED_DISPARITY_ROPE,
-    ]:
-        with pytest.raises(ValidationError, match="full-width"):
-            StereoSRModelConfig(
-                embed_dim=48,
-                num_heads=4,
-                num_blocks=4,
-                window_size=4,
-                cross_window_size=(4, -1),
-                cross_pos_encoding=encoding,
-            )
+def test_stereo_sr_cross_pos_encoding_field_rejected(tmp_path: Path) -> None:
+    yaml_path = _write_yaml(
+        tmp_path,
+        "model:\n  name: stereo_sr\n  cross_pos_encoding: none\n",
+    )
+
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        load_config(yaml_path)
 
 
 def test_stereo_sr_odd_num_heads_allowed_when_head_dim_even(tmp_path: Path) -> None:

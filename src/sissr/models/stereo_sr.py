@@ -7,15 +7,12 @@ import torch
 from einops import rearrange
 from torch import Tensor, nn
 
-from sissr.models.enums import CrossPosEncoding, ResidualStrategy, StereoDirection
+from sissr.models.enums import ResidualStrategy
 from sissr.models.layers.depth_agg import DepthAggregator, DepthState
 from sissr.models.layers.embedding import (
     AxisConfig,
-    EpipolarRoPE,
-    RectifiedDisparityRoPE,
     RotarySpec,
     SpatialRoPE,
-    StereoGeometry,
     VisionGrid,
 )
 from sissr.models.layers.layerscale import LayerScale
@@ -30,14 +27,6 @@ def _to_tokens(x: Tensor) -> Tensor:
 
 def _to_map(x: Tensor, *, height: int, width: int) -> Tensor:
     return rearrange(x, "b (h w) c -> b c h w", h=height, w=width)
-
-
-def _cross_axis_config(head_dim: int, cross_window_size: tuple[int, int]) -> AxisConfig:
-    return AxisConfig.from_head_dim(
-        head_dim,
-        share_height=float(cross_window_size[0]),
-        share_width=float(cross_window_size[1]),
-    )
 
 
 @dataclass(eq=False)
@@ -68,36 +57,6 @@ class StereoDepthPair:
         )
 
 
-class StereoGeometryHead(nn.Module):
-    def __init__(
-        self,
-        embed_dim: int,
-        *,
-        max_disp: float,
-        sigma_min: float = 0.1,
-        sigma_max: float = 8.0,
-    ) -> None:
-        super().__init__()
-        self.max_disp = max_disp
-        self.sigma_min = sigma_min
-        self.sigma_max = sigma_max
-        hidden_dim = embed_dim // 4
-        self.conv1 = nn.Conv2d(4 * embed_dim, hidden_dim, 3, padding=1)
-        self.act = nn.SiLU()
-        self.conv2 = nn.Conv2d(hidden_dim, 2, 3, padding=1)
-        nn.init.zeros_(self.conv2.weight)
-        with torch.no_grad():
-            assert self.conv2.bias is not None
-            self.conv2.bias.copy_(torch.tensor([-5.0, 5.0]))
-
-    def forward(self, source: Tensor, target: Tensor) -> StereoGeometry:
-        features = torch.cat([source, target, source - target, source * target], dim=1)
-        raw: Tensor = self.conv2(self.act(self.conv1(features)))
-        disparity = self.max_disp * torch.sigmoid(raw[:, 0:1])
-        sigma = self.sigma_min + (self.sigma_max - self.sigma_min) * torch.sigmoid(raw[:, 1:2])
-        return StereoGeometry(disparity=disparity, sigma=sigma)
-
-
 class _StereoBlockBase(nn.Module):
     def __init__(
         self,
@@ -107,7 +66,6 @@ class _StereoBlockBase(nn.Module):
         cross_window_size: tuple[int, int],
         mlp_hidden_dim: int,
         *,
-        cross_pos_encoding: CrossPosEncoding,
         shift: bool,
         num_kv_heads: int | None,
         residual_v: bool,
@@ -119,20 +77,6 @@ class _StereoBlockBase(nn.Module):
         self.window_rope = RotarySpec.spatial(
             SpatialRoPE(AxisConfig.from_head_dim(head_dim)),
             VisionGrid(height=window_size, width=window_size),
-        )
-        self.cross_rope = (
-            RotarySpec.spatial(
-                SpatialRoPE(_cross_axis_config(head_dim, cross_window_size)),
-                VisionGrid(height=cross_window_size[0], width=cross_window_size[1]),
-            )
-            if cross_pos_encoding == CrossPosEncoding.WINDOW_ROPE
-            else None
-        )
-
-        self.geom_head: StereoGeometryHead | None = (
-            StereoGeometryHead(dim, max_disp=float(cross_window_size[1]))
-            if cross_pos_encoding == CrossPosEncoding.RECTIFIED_DISPARITY_ROPE
-            else None
         )
 
         self.self_norm = ChannelRMSNorm(dim, learnable=True)
@@ -153,23 +97,7 @@ class _StereoBlockBase(nn.Module):
             embed_dim=dim,
             num_heads=num_heads,
             window_size=cross_window_size,
-            qk_norm=True,
-            epipolar_rope=(
-                EpipolarRoPE(
-                    head_dim=head_dim,
-                    embed_dim=dim,
-                    max_shift=float(cross_window_size[1]),
-                )
-                if cross_pos_encoding == CrossPosEncoding.EPIPOLAR_ROPE
-                else None
-            ),
-            rect_disp_rope=(
-                RectifiedDisparityRoPE(head_dim=head_dim)
-                if cross_pos_encoding == CrossPosEncoding.RECTIFIED_DISPARITY_ROPE
-                else None
-            ),
         )
-        self.cross_scale = LayerScale(dim, init_value=layer_scale_init)
 
         self.mlp_norm = RMSNorm(dim, learnable=True)
         self.mlp = SwiGLU(dim=dim, hidden_dim=mlp_hidden_dim)
@@ -223,16 +151,6 @@ class StereoBlock(_StereoBlockBase):
         left_v, right_v = both_v.chunk(2, dim=0)
         return left_v, right_v
 
-    def _predict_geometry(
-        self, left: Tensor, right: Tensor
-    ) -> tuple[StereoGeometry | None, StereoGeometry | None]:
-        if self.geom_head is None:
-            return None, None
-        return (
-            self.geom_head(left, right),
-            self.geom_head(right, left),
-        )
-
     def _cross_attn_sublayer(self, pair: StereoDepthPair, *, height: int, width: int) -> None:
         both_normed = self.cross_norm(
             _to_map(
@@ -243,28 +161,7 @@ class StereoBlock(_StereoBlockBase):
         )
         left_normed, right_normed = both_normed.chunk(2, dim=0)
 
-        left_geom, right_geom = self._predict_geometry(left_normed, right_normed)
-
-        left_delta = self.cross_scale(
-            self.cross_attn(
-                left_normed,
-                right_normed,
-                shift=self.shift,
-                rotary=self.cross_rope,
-                direction=StereoDirection.LEFT_TO_RIGHT,
-                context_geometry=right_geom,
-            )
-        )
-        right_delta = self.cross_scale(
-            self.cross_attn(
-                right_normed,
-                left_normed,
-                shift=self.shift,
-                rotary=self.cross_rope,
-                direction=StereoDirection.RIGHT_TO_LEFT,
-                context_geometry=left_geom,
-            )
-        )
+        left_delta, right_delta = self.cross_attn(left_normed, right_normed, shift=self.shift)
 
         pair.left.accumulate(_to_tokens(left_delta))
         pair.right.accumulate(_to_tokens(right_delta))
@@ -308,36 +205,9 @@ class StandardStereoBlock(_StereoBlockBase):
         )
         left_normed, right_normed = both_normed.chunk(2, dim=0)
 
-        left_geom: StereoGeometry | None = None
-        right_geom: StereoGeometry | None = None
-        if self.geom_head is not None:
-            left_geom = self.geom_head(left_normed, right_normed)
-            right_geom = self.geom_head(right_normed, left_normed)
-
-        left = left + _to_tokens(
-            self.cross_scale(
-                self.cross_attn(
-                    left_normed,
-                    right_normed,
-                    shift=self.shift,
-                    rotary=self.cross_rope,
-                    direction=StereoDirection.LEFT_TO_RIGHT,
-                    context_geometry=right_geom,
-                )
-            )
-        )
-        right = right + _to_tokens(
-            self.cross_scale(
-                self.cross_attn(
-                    right_normed,
-                    left_normed,
-                    shift=self.shift,
-                    rotary=self.cross_rope,
-                    direction=StereoDirection.RIGHT_TO_LEFT,
-                    context_geometry=left_geom,
-                )
-            )
-        )
+        left_delta, right_delta = self.cross_attn(left_normed, right_normed, shift=self.shift)
+        left = left + _to_tokens(left_delta)
+        right = right + _to_tokens(right_delta)
 
         both_mlp = self.mlp_scale(self.mlp(self.mlp_norm(torch.cat([left, right], dim=0))))
         left_mlp, right_mlp = both_mlp.chunk(2, dim=0)
@@ -356,7 +226,6 @@ def _build_stereo_blocks(
     cross_window_size: tuple[int, int],
     mlp_hidden_dim: int,
     *,
-    cross_pos_encoding: CrossPosEncoding,
     num_kv_heads: int | None,
     layer_scale_init: float,
 ) -> nn.ModuleList:
@@ -368,7 +237,6 @@ def _build_stereo_blocks(
                 window_size=window_size,
                 cross_window_size=cross_window_size,
                 mlp_hidden_dim=mlp_hidden_dim,
-                cross_pos_encoding=cross_pos_encoding,
                 shift=idx % 2 == 1,
                 num_kv_heads=num_kv_heads,
                 residual_v=idx > 0,
@@ -389,7 +257,6 @@ class StandardStereoBody(nn.Module):
         cross_window_size: tuple[int, int],
         mlp_hidden_dim: int,
         *,
-        cross_pos_encoding: CrossPosEncoding,
         num_kv_heads: int | None,
         layer_scale_init: float,
     ) -> None:
@@ -402,7 +269,6 @@ class StandardStereoBody(nn.Module):
             window_size,
             cross_window_size,
             mlp_hidden_dim,
-            cross_pos_encoding=cross_pos_encoding,
             num_kv_heads=num_kv_heads,
             layer_scale_init=layer_scale_init,
         )
@@ -439,7 +305,6 @@ class StereoBody(nn.Module):
         cross_window_size: tuple[int, int],
         mlp_hidden_dim: int,
         *,
-        cross_pos_encoding: CrossPosEncoding,
         num_kv_heads: int | None,
         layer_scale_init: float,
         blocks_per_group: int,
@@ -456,7 +321,6 @@ class StereoBody(nn.Module):
             window_size,
             cross_window_size,
             mlp_hidden_dim,
-            cross_pos_encoding=cross_pos_encoding,
             num_kv_heads=num_kv_heads,
             layer_scale_init=layer_scale_init,
         )
@@ -516,8 +380,7 @@ class StereoSRModel(nn.Module):
         num_heads: int = 6,
         num_blocks: int = 36,
         window_size: int = 16,
-        cross_window_size: tuple[int, int] = (8, 32),
-        cross_pos_encoding: CrossPosEncoding = CrossPosEncoding.WINDOW_ROPE,
+        cross_window_size: tuple[int, int] = (4, -1),
         residual_strategy: ResidualStrategy = ResidualStrategy.DEPTH_AGG,
         mlp_hidden_dim: int = 384,
         num_kv_heads: int | None = None,
@@ -549,11 +412,6 @@ class StereoSRModel(nn.Module):
             raise ValueError("cross_window_size height must be even for shifted windows")
         if cross_w != -1 and cross_w % 2 != 0:
             raise ValueError("cross_window_size width must be even for shifted windows (or -1)")
-        if cross_w == -1 and cross_pos_encoding != CrossPosEncoding.NONE:
-            raise ValueError(
-                "full-width cross-attention (cross_window_size width = -1) "
-                "requires cross_pos_encoding = none"
-            )
         if blocks_per_group < 1:
             raise ValueError(f"blocks_per_group must be positive, got {blocks_per_group}")
         if residual_strategy != ResidualStrategy.DEPTH_AGG and blocks_per_group != 1:
@@ -578,7 +436,6 @@ class StereoSRModel(nn.Module):
                 window_size=window_size,
                 cross_window_size=cross_window_size,
                 mlp_hidden_dim=mlp_hidden_dim,
-                cross_pos_encoding=cross_pos_encoding,
                 num_kv_heads=num_kv_heads,
                 layer_scale_init=layer_scale_init,
                 blocks_per_group=blocks_per_group,
@@ -591,7 +448,6 @@ class StereoSRModel(nn.Module):
                 window_size=window_size,
                 cross_window_size=cross_window_size,
                 mlp_hidden_dim=mlp_hidden_dim,
-                cross_pos_encoding=cross_pos_encoding,
                 num_kv_heads=num_kv_heads,
                 layer_scale_init=layer_scale_init,
             )

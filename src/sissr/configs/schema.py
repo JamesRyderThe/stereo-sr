@@ -8,7 +8,7 @@ import torch
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from torch.optim.lr_scheduler import CosineAnnealingLR, MultiStepLR
 
-from sissr.models.enums import CrossPosEncoding, ModelName, ResiConnection, ResidualStrategy
+from sissr.models.enums import ModelName, ResiConnection, ResidualStrategy
 
 
 class Optimizer(str, Enum):
@@ -46,7 +46,7 @@ class CompileMode(str, Enum):
     def apply(self, model: torch.nn.Module) -> torch.nn.Module:
         if self == self.OFF:
             return model
-        return torch.compile(model, mode=self.value)  # type: ignore[return-value]
+        return torch.compile(model, mode=self.value, dynamic=True)  # type: ignore[return-value]
 
 
 class Precision(str, Enum):
@@ -118,8 +118,7 @@ class StereoSRModelConfig(BaseModelConfig):
     embed_dim: int = 192
     num_blocks: int = 36
     mlp_hidden_dim: int = 384
-    cross_window_size: tuple[int, int] = (8, 32)
-    cross_pos_encoding: CrossPosEncoding = CrossPosEncoding.WINDOW_ROPE
+    cross_window_size: tuple[int, int] = (4, -1)
     residual_strategy: ResidualStrategy = ResidualStrategy.DEPTH_AGG
     num_kv_heads: int | None = None
     blocks_per_group: Annotated[int, Field(ge=1)] | None = None
@@ -145,11 +144,6 @@ class StereoSRModelConfig(BaseModelConfig):
             raise ValueError("cross_window_size height must be even for shifted windows")
         if cross_w != -1 and cross_w % 2 != 0:
             raise ValueError("cross_window_size width must be even for shifted windows (or -1)")
-        if cross_w == -1 and self.cross_pos_encoding != CrossPosEncoding.NONE:
-            raise ValueError(
-                "full-width cross-attention (cross_window_size width = -1) "
-                "requires cross_pos_encoding = none"
-            )
         if (
             self.blocks_per_group not in (None, 1)
             and self.residual_strategy != ResidualStrategy.DEPTH_AGG
@@ -170,7 +164,6 @@ class StereoSRModelConfig(BaseModelConfig):
             num_blocks=self.num_blocks,
             window_size=self.window_size,
             cross_window_size=self.cross_window_size,
-            cross_pos_encoding=self.cross_pos_encoding,
             residual_strategy=self.residual_strategy,
             mlp_hidden_dim=self.mlp_hidden_dim,
             num_kv_heads=self.num_kv_heads,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import pytest
 import torch
 from torch import Tensor
@@ -13,7 +15,6 @@ from sissr.models.layers.embedding import (
     RectifiedDisparityRoPE,
     RotarySpec,
     SpatialRoPE,
-    StereoGeometry,
     VisionGrid,
 )
 from sissr.models.layers.norm import ChannelRMSNorm
@@ -128,38 +129,54 @@ def test_windowed_attention_shifted_spatial_rope_shape_and_finite() -> None:
     assert out.isfinite().all()
 
 
-@pytest.mark.parametrize("use_rope", [False, True])
-def test_windowed_cross_attention_shifted_multi_context_shape_and_finite(use_rope: bool) -> None:
-    spec = (
-        RotarySpec(
-            rope=SpatialRoPE(AxisConfig.from_head_dim(8)),
-            grid=VisionGrid(height=4, width=8),
-        )
-        if use_rope
-        else None
-    )
+@pytest.mark.parametrize("shift", [False, True])
+def test_windowed_cross_attention_shape_and_finite(shift: bool) -> None:
     module = WindowedCrossAttention(embed_dim=32, num_heads=4, window_size=(4, 8))
-    x = torch.randn(1, 32, 8, 16)
-    contexts = [torch.randn(1, 32, 8, 16), torch.randn(1, 32, 8, 16)]
+    left = torch.randn(1, 32, 8, 16)
+    right = torch.randn(1, 32, 8, 16)
 
-    out = module(x, contexts, shift=True, rotary=spec)
+    left_out, right_out = module(left, right, shift=shift)
 
-    assert out.shape == x.shape
-    assert out.isfinite().all()
+    assert left_out.shape == left.shape
+    assert right_out.shape == right.shape
+    assert left_out.isfinite().all()
+    assert right_out.isfinite().all()
 
 
-def test_windowed_cross_attention_uses_second_context() -> None:
+def test_windowed_cross_attention_tied_weights_swap_outputs() -> None:
     torch.manual_seed(0)
     module = WindowedCrossAttention(embed_dim=32, num_heads=4, window_size=(4, 8))
     module.eval()
-    x = torch.randn(1, 32, 8, 16)
-    context_a = torch.randn(1, 32, 8, 16)
-    context_b = torch.randn(1, 32, 8, 16)
+    with torch.no_grad():
+        module.right_match_proj.weight.copy_(module.left_match_proj.weight)
+        assert module.left_match_proj.bias is not None
+        assert module.right_match_proj.bias is not None
+        module.right_match_proj.bias.copy_(module.left_match_proj.bias)
+        module.right_value_proj.weight.copy_(module.left_value_proj.weight)
+        assert module.left_value_proj.bias is not None
+        assert module.right_value_proj.bias is not None
+        module.right_value_proj.bias.copy_(module.left_value_proj.bias)
+        module.right_out_proj.weight.copy_(module.left_out_proj.weight)
+        assert module.left_out_proj.bias is not None
+        assert module.right_out_proj.bias is not None
+        module.right_out_proj.bias.copy_(module.left_out_proj.bias)
+        module.gamma.copy_(module.beta)
+    left = torch.randn(1, 32, 8, 16)
+    right = torch.randn(1, 32, 8, 16)
 
-    out_single = module(x, context_a)
-    out_multi = module(x, [context_a, context_b])
+    left_out, right_out = module(left, right)
+    swapped_left_out, swapped_right_out = module(right, left)
 
-    assert not torch.allclose(out_single, out_multi)
+    assert torch.allclose(left_out, swapped_right_out, atol=1e-5)
+    assert torch.allclose(right_out, swapped_left_out, atol=1e-5)
+
+
+def test_windowed_cross_attention_default_projections_are_untied() -> None:
+    module = WindowedCrossAttention(embed_dim=32, num_heads=4, window_size=(4, 8))
+
+    assert module.left_match_proj.weight.data_ptr() != module.right_match_proj.weight.data_ptr()
+    assert module.left_value_proj.weight.data_ptr() != module.right_value_proj.weight.data_ptr()
+    assert module.left_out_proj.weight.data_ptr() != module.right_out_proj.weight.data_ptr()
 
 
 def test_windowed_cross_attention_invalid_rectangular_spatial_raises() -> None:
@@ -168,6 +185,149 @@ def test_windowed_cross_attention_invalid_rectangular_spatial_raises() -> None:
 
     with pytest.raises(ValueError, match="must divide by window_size"):
         module(x, x)
+
+
+def test_windowed_cross_attention_mismatched_shapes_raise() -> None:
+    module = WindowedCrossAttention(embed_dim=32, num_heads=4, window_size=(4, 8))
+    left = torch.randn(1, 32, 8, 16)
+    right = torch.randn(1, 32, 8, 8)
+
+    with pytest.raises(ValueError, match="must have the same shape"):
+        module(left, right)
+
+
+def test_windowed_cross_attention_beta_can_disable_left_transfer() -> None:
+    module = WindowedCrossAttention(embed_dim=32, num_heads=4, window_size=(4, 8))
+    left = torch.randn(1, 32, 8, 16)
+    right = torch.randn(1, 32, 8, 16)
+
+    with torch.no_grad():
+        module.beta.zero_()
+
+    left_out, right_out = module(left, right)
+
+    assert torch.equal(left_out, torch.zeros_like(left_out))
+    assert not torch.equal(right_out, torch.zeros_like(right_out))
+
+
+def test_windowed_cross_attention_gamma_can_disable_right_transfer() -> None:
+    module = WindowedCrossAttention(embed_dim=32, num_heads=4, window_size=(4, 8))
+    left = torch.randn(1, 32, 8, 16)
+    right = torch.randn(1, 32, 8, 16)
+
+    with torch.no_grad():
+        module.gamma.zero_()
+
+    left_out, right_out = module(left, right)
+
+    assert not torch.equal(left_out, torch.zeros_like(left_out))
+    assert torch.equal(right_out, torch.zeros_like(right_out))
+
+
+def test_windowed_cross_attention_sharp_matches_get_higher_streamed_confidence() -> None:
+    module = WindowedCrossAttention(embed_dim=4, num_heads=1, window_size=(1, 2))
+    sharp = torch.tensor([[[[4.0, 0.0], [0.0, 4.0]]]])
+    diffuse = torch.ones((1, 1, 2, 2))
+
+    sharp_left_lse, sharp_left_max = module._row_stats(sharp, sharp, None)
+    sharp_right_lse, sharp_right_max = module._row_stats(sharp, sharp, None)
+    diffuse_left_lse, diffuse_left_max = module._row_stats(diffuse, diffuse, None)
+    diffuse_right_lse, diffuse_right_max = module._row_stats(diffuse, diffuse, None)
+
+    sharp_left_conf, sharp_right_conf = module._stream_cycle_confidence(
+        left_q=sharp,
+        right_q=sharp,
+        left_k=sharp,
+        right_k=sharp,
+        left_attn_mask=None,
+        right_attn_mask=None,
+        left_row_lse=sharp_left_lse,
+        left_row_max=sharp_left_max,
+        right_row_lse=sharp_right_lse,
+        right_row_max=sharp_right_max,
+    )
+    diffuse_left_conf, diffuse_right_conf = module._stream_cycle_confidence(
+        left_q=diffuse,
+        right_q=diffuse,
+        left_k=diffuse,
+        right_k=diffuse,
+        left_attn_mask=None,
+        right_attn_mask=None,
+        left_row_lse=diffuse_left_lse,
+        left_row_max=diffuse_left_max,
+        right_row_lse=diffuse_right_lse,
+        right_row_max=diffuse_right_max,
+    )
+
+    assert torch.all(sharp_left_conf >= 0.0)
+    assert torch.all(sharp_left_conf <= 1.0)
+    assert torch.all(sharp_right_conf >= 0.0)
+    assert torch.all(sharp_right_conf <= 1.0)
+    assert torch.all(sharp_left_conf > diffuse_left_conf)
+    assert torch.all(sharp_right_conf > diffuse_right_conf)
+
+
+def test_windowed_cross_attention_per_head_mask_changes_output() -> None:
+    torch.manual_seed(0)
+    module = WindowedCrossAttention(embed_dim=32, num_heads=4, window_size=(4, 8))
+    left = torch.randn(1, 32, 8, 16)
+    right = torch.randn(1, 32, 8, 16)
+    seq_len = 32
+    num_direction_windows = (left.shape[2] // 4) * (left.shape[3] // 8)
+    base_mask = torch.zeros((num_direction_windows, 4, seq_len, seq_len))
+    masked = base_mask.clone()
+    masked[:, 1, :, seq_len // 2 :] = torch.finfo(masked.dtype).min
+
+    base_left, base_right = module(left, right, mask=base_mask)
+    masked_left, masked_right = module(left, right, mask=masked)
+
+    assert torch.max(torch.abs(base_left - masked_left)).item() > 0.0
+    assert torch.max(torch.abs(base_right - masked_right)).item() > 0.0
+
+
+def test_windowed_cross_attention_tau_changes_output() -> None:
+    torch.manual_seed(0)
+    module = WindowedCrossAttention(embed_dim=32, num_heads=4, window_size=(4, 8))
+    module.eval()
+    left = torch.randn(1, 32, 8, 16)
+    right = torch.randn(1, 32, 8, 16)
+
+    with torch.no_grad():
+        module.log_tau_h.fill_(math.log(0.25))
+        low_temp_left, _ = module(left, right)
+        module.log_tau_h.fill_(math.log(4.0))
+        high_temp_left, _ = module(left, right)
+
+    assert torch.max(torch.abs(low_temp_left - high_temp_left)).item() > 0.0
+
+
+def test_windowed_cross_attention_extreme_tau_stays_finite() -> None:
+    module = WindowedCrossAttention(embed_dim=32, num_heads=4, window_size=(4, 8))
+    left = torch.randn(1, 32, 8, 16)
+    right = torch.randn(1, 32, 8, 16)
+
+    with torch.no_grad():
+        module.log_tau_h.fill_(100.0)
+        high_out = module(left, right)
+        module.log_tau_h.fill_(-100.0)
+        low_out = module(left, right)
+
+    assert high_out[0].isfinite().all()
+    assert high_out[1].isfinite().all()
+    assert low_out[0].isfinite().all()
+    assert low_out[1].isfinite().all()
+
+
+def test_windowed_cross_attention_bfloat16_autocast_stays_finite() -> None:
+    module = WindowedCrossAttention(embed_dim=32, num_heads=4, window_size=(4, 8))
+    left = torch.randn(1, 32, 8, 16)
+    right = torch.randn(1, 32, 8, 16)
+
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        left_out, right_out = module(left, right)
+
+    assert left_out.isfinite().all()
+    assert right_out.isfinite().all()
 
 
 def test_depth_state_accumulate_sets_partial_when_none() -> None:
@@ -500,38 +660,6 @@ def test_epipolar_rope_direction_flips_shift() -> None:
     assert torch.allclose(out_l2r[..., : rope.h_dim], out_r2l[..., : rope.h_dim], atol=1e-5)
 
 
-def test_windowed_cross_attention_with_epipolar_rope_shape_and_finite() -> None:
-    rope = EpipolarRoPE(head_dim=8, embed_dim=32)
-    module = WindowedCrossAttention(
-        embed_dim=32, num_heads=4, window_size=(4, 8), epipolar_rope=rope
-    )
-    x = torch.randn(1, 32, 8, 16)
-    context = torch.randn(1, 32, 8, 16)
-
-    out = module(x, context, shift=True)
-
-    assert out.shape == x.shape
-    assert out.isfinite().all()
-
-
-def test_windowed_cross_attention_direction_changes_output() -> None:
-    rope = EpipolarRoPE(head_dim=8, embed_dim=32)
-    module = WindowedCrossAttention(
-        embed_dim=32, num_heads=4, window_size=(4, 8), epipolar_rope=rope
-    )
-    x = torch.randn(1, 32, 8, 16)
-    context = torch.randn(1, 32, 8, 16)
-
-    with torch.no_grad():
-        rope.offset_proj.bias.copy_(torch.tensor([2.0, rope.offset_proj.bias[1].item()]))
-
-    out_l2r = module(x, context, direction=StereoDirection.LEFT_TO_RIGHT)
-    out_r2l = module(x, context, direction=StereoDirection.RIGHT_TO_LEFT)
-
-    assert out_l2r.shape == out_r2l.shape
-    assert not torch.allclose(out_l2r, out_r2l)
-
-
 def test_rectified_disparity_rope_q_shape_and_finite() -> None:
     rope = RectifiedDisparityRoPE(head_dim=8)
     q = torch.randn(2, 32, 4, 8)
@@ -646,81 +774,58 @@ def test_rectified_disparity_rope_grid_cache_respects_width() -> None:
     assert not torch.equal(cols_8, cols_4)
 
 
-def test_windowed_cross_attention_with_rect_disp_rope() -> None:
-    rope = RectifiedDisparityRoPE(head_dim=8)
-    module = WindowedCrossAttention(
-        embed_dim=32, num_heads=4, window_size=(4, 8), rect_disp_rope=rope
-    )
-    x = torch.randn(1, 32, 8, 16)
-    context = torch.randn(1, 32, 8, 16)
-    geom = StereoGeometry(
-        disparity=torch.rand(1, 1, 8, 16) * 5.0,
-        sigma=torch.ones(1, 1, 8, 16),
-    )
-
-    out = module(
-        x,
-        context,
-        direction=StereoDirection.LEFT_TO_RIGHT,
-        context_geometry=geom,
-    )
-
-    assert out.shape == x.shape
-    assert out.isfinite().all()
-
-
-def test_windowed_cross_attention_rect_disp_rope_with_shift() -> None:
-    rope = RectifiedDisparityRoPE(head_dim=8)
-    module = WindowedCrossAttention(
-        embed_dim=32, num_heads=4, window_size=(4, 8), rect_disp_rope=rope
-    )
-    x = torch.randn(1, 32, 8, 16)
-    context = torch.randn(1, 32, 8, 16)
-    geom = StereoGeometry(
-        disparity=torch.rand(1, 1, 8, 16) * 5.0,
-        sigma=torch.ones(1, 1, 8, 16),
-    )
-
-    out = module(
-        x,
-        context,
-        shift=True,
-        direction=StereoDirection.LEFT_TO_RIGHT,
-        context_geometry=geom,
-    )
-
-    assert out.shape == x.shape
-    assert out.isfinite().all()
-
-
-def test_windowed_cross_attention_rejects_both_ropes() -> None:
-    with pytest.raises(ValueError, match="cannot use both"):
-        WindowedCrossAttention(
-            embed_dim=32,
-            num_heads=4,
-            window_size=(4, 8),
-            epipolar_rope=EpipolarRoPE(head_dim=8, embed_dim=32),
-            rect_disp_rope=RectifiedDisparityRoPE(head_dim=8),
-        )
-
-
 def test_windowed_cross_attention_full_width_shape_and_finite() -> None:
     module = WindowedCrossAttention(embed_dim=32, num_heads=4, window_size=(4, -1))
-    x = torch.randn(1, 32, 8, 16)
-    context = torch.randn(1, 32, 8, 16)
+    left = torch.randn(1, 32, 8, 16)
+    right = torch.randn(1, 32, 8, 16)
 
-    out = module(x, context)
+    left_out, right_out = module(left, right)
 
-    assert out.shape == x.shape
-    assert out.isfinite().all()
+    assert left_out.shape == left.shape
+    assert right_out.shape == right.shape
+    assert left_out.isfinite().all()
+    assert right_out.isfinite().all()
 
 
 def test_windowed_cross_attention_full_width_with_shift() -> None:
     module = WindowedCrossAttention(embed_dim=32, num_heads=4, window_size=(4, -1))
-    x = torch.randn(1, 32, 8, 16)
-    context = torch.randn(1, 32, 8, 16)
+    left = torch.randn(1, 32, 8, 16)
+    right = torch.randn(1, 32, 8, 16)
 
-    out = module(x, context, shift=True)
+    left_out, right_out = module(left, right, shift=True)
 
-    assert out.shape == x.shape
-    assert out.isfinite().all()
+    assert left_out.shape == left.shape
+    assert right_out.shape == right.shape
+    assert left_out.isfinite().all()
+    assert right_out.isfinite().all()
+
+
+def test_windowed_cross_attention_full_width_train_eval_match() -> None:
+    torch.manual_seed(0)
+    module = WindowedCrossAttention(embed_dim=32, num_heads=4, window_size=(4, -1))
+    left = torch.randn(1, 32, 8, 16)
+    right = torch.randn(1, 32, 8, 16)
+
+    module.eval()
+    with torch.no_grad():
+        eval_left, eval_right = module(left, right)
+
+    module.train()
+    with torch.no_grad():
+        train_left, train_right = module(left, right)
+
+    assert torch.allclose(eval_left, train_left, atol=1e-4, rtol=1e-4)
+    assert torch.allclose(eval_right, train_right, atol=1e-4, rtol=1e-4)
+
+
+def test_windowed_cross_attention_gradients_flow_to_all_params() -> None:
+    module = WindowedCrossAttention(embed_dim=32, num_heads=4, window_size=(4, 8))
+    left = torch.randn(1, 32, 8, 16)
+    right = torch.randn(1, 32, 8, 16)
+
+    left_out, right_out = module(left, right, shift=True)
+    torch.autograd.backward(left_out.sum() + right_out.sum())
+
+    for name, param in module.named_parameters():
+        if param.requires_grad:
+            assert param.grad is not None, f"no gradient for {name}"

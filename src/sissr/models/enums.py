@@ -18,13 +18,6 @@ class ResidualStrategy(str, Enum):
     STANDARD = "standard"
 
 
-class CrossPosEncoding(str, Enum):
-    NONE = "none"
-    WINDOW_ROPE = "window_rope"
-    EPIPOLAR_ROPE = "epipolar_rope"
-    RECTIFIED_DISPARITY_ROPE = "rectified_disparity_rope"
-
-
 class StereoDirection(int, Enum):
     LEFT_TO_RIGHT = 1
     RIGHT_TO_LEFT = -1

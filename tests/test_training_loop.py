@@ -22,7 +22,7 @@ from sissr.configs.schema import (
     TrainConfig,
 )
 from sissr.data.datasets import StereoSRBatch
-from sissr.models.enums import CrossPosEncoding, ResidualStrategy
+from sissr.models.enums import ResidualStrategy
 from sissr.train.trainer import Trainer, _batch_stream, _finalize_eval_metrics, build_model
 
 
@@ -47,6 +47,15 @@ class _ReduceStub:
         assert scale == 1.0
         assert tensor.dtype == torch.float64
         return self._reduced
+
+
+class _CompiledWrapper(torch.nn.Module):
+    def __init__(self, module: torch.nn.Module) -> None:
+        super().__init__()
+        self.module = module
+
+    def forward(self, *args: object, **kwargs: object) -> torch.Tensor:
+        return self.module(*args, **kwargs)  # type: ignore[no-any-return]
 
 
 def _tiny_model_config() -> DiffSSRModelConfig:
@@ -155,6 +164,42 @@ def test_smoke_params_update_and_loss_finite(tmp_path: Path) -> None:
     assert (tmp_path / "ckpts" / "latest").exists()
 
 
+def test_trainer_uses_dynamic_compiled_model_for_eval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset_root = _tiny_dataset(tmp_path)
+    config = ExperimentConfig(
+        **{
+            **_tiny_config(dataset_root, tmp_path / "ckpts").model_dump(),
+            "train": {
+                **_tiny_config(dataset_root, tmp_path / "ckpts").train.model_dump(),
+                "compile": CompileMode.DEFAULT,
+            },
+        }
+    )
+    compiled_calls: list[tuple[str, bool, _CompiledWrapper]] = []
+
+    def fake_compile(
+        model: torch.nn.Module,
+        *,
+        mode: str,
+        dynamic: bool,
+    ) -> torch.nn.Module:
+        compiled = _CompiledWrapper(model)
+        compiled_calls.append((mode, dynamic, compiled))
+        return compiled
+
+    monkeypatch.setattr("sissr.configs.schema.torch.compile", fake_compile)
+
+    trainer = Trainer(config)
+
+    assert len(compiled_calls) == 1
+    mode, dynamic, compiled = compiled_calls[0]
+    assert mode == CompileMode.DEFAULT.value
+    assert dynamic is True
+    assert trainer._eval_model is compiled
+
+
 def test_resume_restores_step(tmp_path: Path) -> None:
     dataset_root = _tiny_dataset(tmp_path)
     ckpt_dir = tmp_path / "ckpts"
@@ -185,15 +230,11 @@ def test_build_model_from_config() -> None:
 
 
 @pytest.mark.parametrize(
-    "cross_pos_encoding",
-    [CrossPosEncoding.NONE, CrossPosEncoding.WINDOW_ROPE],
-)
-@pytest.mark.parametrize(
     "residual_strategy",
     [ResidualStrategy.DEPTH_AGG, ResidualStrategy.STANDARD],
 )
 def test_build_stereo_model_from_config(
-    cross_pos_encoding: CrossPosEncoding, residual_strategy: ResidualStrategy
+    residual_strategy: ResidualStrategy,
 ) -> None:
     config = StereoSRModelConfig(
         embed_dim=48,
@@ -201,7 +242,6 @@ def test_build_stereo_model_from_config(
         num_blocks=1,
         window_size=4,
         cross_window_size=(4, 8),
-        cross_pos_encoding=cross_pos_encoding,
         residual_strategy=residual_strategy,
         mlp_hidden_dim=64,
         upscale=4,

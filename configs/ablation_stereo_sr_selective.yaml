@@ -1,5 +1,5 @@
-experiment_name: ablation_stereo_sr_wide
-output_dir: outputs/ablation_stereo_sr_wide
+experiment_name: ablation_stereo_sr_selective
+output_dir: outputs/ablation_stereo_sr_selective
 
 model:
   name: stereo_sr
@@ -7,11 +7,10 @@ model:
   num_heads: 6
   num_blocks: 36
   window_size: 16
-  cross_window_size: [4, 64]
-  cross_pos_encoding: epipolar_rope
-  residual_strategy: depth_agg
-  blocks_per_group: 8
+  cross_window_size: [4, -1]
+  residual_strategy: standard
   mlp_hidden_dim: 384
+  layer_scale_init: 1e-4
   upscale: 4
   img_range: 1.0
 
@@ -19,7 +18,7 @@ data:
   dataset_root: /workspace/datasets/StereoSR
   test_datasets: [flickr1024]
   scale: 4
-  patch_size_lr: [32, 128]
+  patch_size_lr: [32, 96]
   batch_size: 4
   num_workers: 4
   prefetch_factor: 2
@@ -46,7 +45,7 @@ train:
   ema_decay: 0.999
   compile: default
   precision: bf16
-  checkpoint_dir: /workspace/checkpoints/ablation_stereo_sr_wide
+  checkpoint_dir: /workspace/checkpoints/ablation_stereo_sr_selective
   checkpoint_interval: 10000
   max_checkpoints: 2
   eta_min: 0.0000001
@@ -55,7 +54,7 @@ train:
   seed: 42
   resume_from: ""
   wandb_project: james-sissr
-  wandb_run_name: "ablation-stereo-sr-wide-50k"
+  wandb_run_name: "ablation-stereo-sr-selective-50k"
 
 loss:
   charbonnier_weight: 1.0

@@ -8,7 +8,6 @@ model:
   num_blocks: 36
   window_size: 16
   cross_window_size: [4, -1]
-  cross_pos_encoding: none
   residual_strategy: depth_agg
   blocks_per_group: 8
   mlp_hidden_dim: 384
@@ -54,7 +53,7 @@ train:
   seed: 42
   resume_from: ""
   wandb_project: james-sissr
-  wandb_run_name: "stereo-sr-baseline-benchmark"
+  wandb_run_name: "stereo-sr-baseline-selective-full-width"
 
 loss:
   charbonnier_weight: 1.0

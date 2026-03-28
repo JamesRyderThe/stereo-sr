@@ -1,5 +1,5 @@
-experiment_name: ablation_stereo_sr
-output_dir: outputs/ablation_stereo_sr
+experiment_name: ablation_stereo_sr_full_width
+output_dir: outputs/ablation_stereo_sr_full_width
 
 model:
   name: stereo_sr
@@ -8,7 +8,6 @@ model:
   num_blocks: 36
   window_size: 16
   cross_window_size: [4, -1]
-  cross_pos_encoding: none
   residual_strategy: depth_agg
   blocks_per_group: 8
   mlp_hidden_dim: 384
@@ -46,7 +45,7 @@ train:
   ema_decay: 0.999
   compile: default
   precision: bf16
-  checkpoint_dir: /workspace/checkpoints/ablation_stereo_sr
+  checkpoint_dir: /workspace/checkpoints/ablation_stereo_sr_full_width
   checkpoint_interval: 10000
   max_checkpoints: 2
   eta_min: 0.0000001
@@ -55,7 +54,7 @@ train:
   seed: 42
   resume_from: ""
   wandb_project: james-sissr
-  wandb_run_name: "ablation-stereo-sr-50k-depth-agg-no-cross-rope"
+  wandb_run_name: "ablation-stereo-sr-selective-full-width-50k"
 
 loss:
   charbonnier_weight: 1.0

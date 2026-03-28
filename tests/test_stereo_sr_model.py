@@ -6,14 +6,15 @@ import pytest
 import torch
 from torch import Tensor
 
-from sissr.models.enums import CrossPosEncoding, ResidualStrategy
+from sissr.models.enums import ResidualStrategy
+from sissr.models.layers.window_attn import WindowedCrossAttention
 from sissr.models.stereo_sr import StereoBody, StereoSRModel
 
 
 def _make_model(
     window_size: int = 4,
     *,
-    cross_pos_encoding: CrossPosEncoding = CrossPosEncoding.WINDOW_ROPE,
+    cross_window_size: tuple[int, int] = (4, 8),
     residual_strategy: ResidualStrategy = ResidualStrategy.DEPTH_AGG,
     blocks_per_group: int | None = None,
 ) -> StereoSRModel:
@@ -22,8 +23,7 @@ def _make_model(
         num_heads=4,
         num_blocks=4,
         window_size=window_size,
-        cross_window_size=(4, 8),
-        cross_pos_encoding=cross_pos_encoding,
+        cross_window_size=cross_window_size,
         residual_strategy=residual_strategy,
         mlp_hidden_dim=64,
         blocks_per_group=blocks_per_group,
@@ -33,16 +33,11 @@ def _make_model(
 
 
 @pytest.mark.parametrize(
-    "cross_pos_encoding",
-    [
-        CrossPosEncoding.NONE,
-        CrossPosEncoding.WINDOW_ROPE,
-        CrossPosEncoding.EPIPOLAR_ROPE,
-        CrossPosEncoding.RECTIFIED_DISPARITY_ROPE,
-    ],
+    "residual_strategy",
+    [ResidualStrategy.DEPTH_AGG, ResidualStrategy.STANDARD],
 )
-def test_forward_pass_shape_and_finite(cross_pos_encoding: CrossPosEncoding) -> None:
-    model = _make_model(cross_pos_encoding=cross_pos_encoding)
+def test_forward_pass_shape_and_finite(residual_strategy: ResidualStrategy) -> None:
+    model = _make_model(residual_strategy=residual_strategy)
     model.eval()
     x = torch.randn(1, 6, 16, 16)
     with torch.no_grad():
@@ -52,18 +47,7 @@ def test_forward_pass_shape_and_finite(cross_pos_encoding: CrossPosEncoding) -> 
 
 
 def test_full_width_cross_attention_forward_shape_and_finite() -> None:
-    model = StereoSRModel(
-        embed_dim=48,
-        num_heads=4,
-        num_blocks=4,
-        window_size=4,
-        cross_window_size=(4, -1),
-        cross_pos_encoding=CrossPosEncoding.NONE,
-        residual_strategy=ResidualStrategy.DEPTH_AGG,
-        mlp_hidden_dim=64,
-        upscale=4,
-        img_range=1.0,
-    )
+    model = _make_model(cross_window_size=(4, -1))
     model.eval()
     x = torch.randn(1, 6, 16, 16)
     with torch.no_grad():
@@ -73,18 +57,7 @@ def test_full_width_cross_attention_forward_shape_and_finite() -> None:
 
 
 def test_full_width_cross_attention_all_params_grad() -> None:
-    model = StereoSRModel(
-        embed_dim=48,
-        num_heads=4,
-        num_blocks=4,
-        window_size=4,
-        cross_window_size=(4, -1),
-        cross_pos_encoding=CrossPosEncoding.NONE,
-        residual_strategy=ResidualStrategy.DEPTH_AGG,
-        mlp_hidden_dim=64,
-        upscale=4,
-        img_range=1.0,
-    )
+    model = _make_model(cross_window_size=(4, -1))
     model.train()
     x = torch.randn(1, 6, 8, 8)
     out: Tensor = model(x)
@@ -115,20 +88,42 @@ def test_cross_window_padding_shape_and_finite() -> None:
     assert out.isfinite().all()
 
 
-def test_cross_pos_encoding_changes_output_with_same_weights() -> None:
+def test_cross_window_size_changes_output_with_same_weights() -> None:
     torch.manual_seed(0)
-    model_none = _make_model(cross_pos_encoding=CrossPosEncoding.NONE)
-    model_rope = _make_model(cross_pos_encoding=CrossPosEncoding.WINDOW_ROPE)
-    model_rope.load_state_dict(model_none.state_dict())
-    model_none.eval()
-    model_rope.eval()
+    bounded = _make_model(cross_window_size=(4, 8))
+    full_width = _make_model(cross_window_size=(4, -1))
+    full_width.load_state_dict(bounded.state_dict())
+    bounded.eval()
+    full_width.eval()
     x = torch.randn(1, 6, 16, 16)
 
     with torch.no_grad():
-        out_none: Tensor = model_none(x)
-        out_rope: Tensor = model_rope(x)
+        out_bounded: Tensor = bounded(x)
+        out_full_width: Tensor = full_width(x)
 
-    assert torch.max(torch.abs(out_none - out_rope)).item() > 0.0
+    assert torch.max(torch.abs(out_bounded - out_full_width)).item() > 0.0
+
+
+def test_cross_view_transfer_gains_change_model_output() -> None:
+    torch.manual_seed(0)
+    enabled = _make_model(residual_strategy=ResidualStrategy.STANDARD)
+    disabled = _make_model(residual_strategy=ResidualStrategy.STANDARD)
+    disabled.load_state_dict(enabled.state_dict())
+    enabled.eval()
+    disabled.eval()
+
+    with torch.no_grad():
+        for module in disabled.modules():
+            if isinstance(module, WindowedCrossAttention):
+                module.beta.zero_()
+                module.gamma.zero_()
+
+    x = torch.randn(1, 6, 16, 16)
+    with torch.no_grad():
+        enabled_out = enabled(x)
+        disabled_out = disabled(x)
+
+    assert torch.max(torch.abs(enabled_out - disabled_out)).item() > 0.0
 
 
 def test_output_dtype_matches_input() -> None:
@@ -255,48 +250,6 @@ def test_depth_agg_blocks_per_group_gt_num_blocks_is_single_group() -> None:
 
     assert model.body.left_depth.max_sources == 2
     assert model.body.right_depth.max_sources == 2
-
-
-def test_epipolar_rope_all_parameters_receive_gradients() -> None:
-    model = _make_model(cross_pos_encoding=CrossPosEncoding.EPIPOLAR_ROPE)
-    model.train()
-    x = torch.randn(1, 6, 8, 8)
-    out: Tensor = model(x)
-    loss = out.sum()
-    torch.autograd.backward(loss)
-    for name, param in model.named_parameters():
-        if param.requires_grad:
-            assert param.grad is not None, f"no gradient for {name}"
-
-
-def test_rectified_disparity_rope_all_parameters_receive_gradients() -> None:
-    model = _make_model(cross_pos_encoding=CrossPosEncoding.RECTIFIED_DISPARITY_ROPE)
-    model.train()
-    x = torch.randn(1, 6, 8, 8)
-    out: Tensor = model(x)
-    loss = out.sum()
-    torch.autograd.backward(loss)
-    for name, param in model.named_parameters():
-        if param.requires_grad:
-            assert param.grad is not None, f"no gradient for {name}"
-
-
-def test_rectified_disparity_rope_has_geometry_head_params() -> None:
-    model = _make_model(cross_pos_encoding=CrossPosEncoding.RECTIFIED_DISPARITY_ROPE)
-    geom_params = [n for n, _ in model.named_parameters() if "geom_head" in n]
-    beta_params = [n for n, _ in model.named_parameters() if "beta" in n]
-    assert len(geom_params) > 0
-    assert len(beta_params) > 0
-
-
-def test_standard_residual_forward_shape_and_finite() -> None:
-    model = _make_model(residual_strategy=ResidualStrategy.STANDARD)
-    model.eval()
-    x = torch.randn(1, 6, 16, 16)
-    with torch.no_grad():
-        out: Tensor = model(x)
-    assert out.shape == (1, 6, 64, 64)
-    assert out.isfinite().all()
 
 
 def test_standard_residual_nonsquare() -> None:
