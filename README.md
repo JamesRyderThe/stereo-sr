@@ -1,4 +1,10 @@
-# stereo-scope
+# stereo-sr
+
+[![CI](https://github.com/JamesRyderThe/stereo-sr/actions/workflows/ci.yml/badge.svg)](https://github.com/JamesRyderThe/stereo-sr/actions/workflows/ci.yml)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+[![mypy: strict](https://img.shields.io/badge/mypy-strict-blue)](http://mypy-lang.org/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.10-ee4c2c)](https://pytorch.org/)
 
 Stereo image super-resolution with geometry-aware cross-view transfer.
 
