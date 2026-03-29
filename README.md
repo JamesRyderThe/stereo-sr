@@ -8,13 +8,13 @@
 
 Stereo image super-resolution with geometry-aware cross-view transfer.
 
-The idea: stereo SR models shouldn't learn cross-view correspondence from scratch on tiny datasets. A frozen stereo foundation model already knows where things are — use that to decide where cross-view borrowing is safe.
+The idea: stereo SR models shouldn't learn cross-view correspondence from scratch on tiny datasets. A frozen stereo foundation model already knows where things are, use that to decide where cross-view borrowing is safe.
 
 ## What's here
 
 Custom stereo SR backbone. Parallel L/R paths, windowed self-attention, rectangular cross-attention aligned to epipolar geometry, geometry-gated transfer via predicted disparity + confidence. Depth aggregation residual strategy based on [Attention Residuals](https://arxiv.org/abs/2603.15031) (Kimi team). Epipolar RoPE. `torch.compile`, DDP, bf16. 180+ tests, `mypy --strict`, Pydantic configs.
 
-Active research — architecture and training are evolving.
+This is active research. Architecture and training are evolving.
 
 ## Results
 
@@ -22,7 +22,7 @@ Active research — architecture and training are evolving.
 |--------|-------|-----------|-----------|-----------|-----------|
 | NAFSSR-L | x4 | 24.17 | 27.12 | 26.96 | 30.30 |
 | DIFFSSR | x4 | 24.47 | 27.26 | 26.98 | 30.65 |
-| **Ours** | x4 | — | — | — | — |
+| **Ours** | x4 | - | - | - | - |
 
 Evaluation matches iPASSR protocol exactly (RGB, 7x7 uniform window SSIM, no border crop).
 
